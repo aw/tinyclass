@@ -13,10 +13,34 @@ tinyclass decide "Payroll asks for your password on a non-company sign-in page."
 
 ## Installing
 
+With [mise](https://mise.jdx.dev):
+
+```bash
+mise use -g github:monorkin/tinyclass                      # install it and put tinyclass on your PATH
+mise exec github:monorkin/tinyclass -- tinyclass --help    # or run it once without installing
+```
+
+On [Omarchy](https://omarchy.org):
+
+```bash
+omarchy-mise-install github:monorkin/tinyclass tinyclass
+```
+
+From source:
+
 ```bash
 cargo install --path .
+```
+
+Then, either way:
+
+```bash
 tinyclass shell-completion install zsh
 ```
+
+The release binaries carry llama.cpp inside them, so there's nothing else to
+install. They need glibc 2.39 or newer and the Vulkan loader
+(`libvulkan.so.1`), which any Linux with GPU drivers already has.
 
 ## Usage
 
@@ -72,6 +96,10 @@ tinyclass noul "The moon is made of cheese."   # Simple YES/NO questions: how li
 tinyclass model list           # the Qwen3 sizes tinyclass knows
 tinyclass model set qwen3-1.7b # pick one
 tinyclass model pull           # fetch it from Hugging Face
+
+tinyclass device list          # the CPU and GPUs llama.cpp sees
+tinyclass device set gpu       # auto (the default), cpu, gpu, or gpu:N
+tinyclass decide "…" A B --device cpu   # override for one run
 ```
 
 Models live under `~/.local/share/tinyclass/models`, or `$XDG_DATA_HOME/tinyclass`.
@@ -86,6 +114,8 @@ The idea from [Jev in 25 lines of Python](https://www.nobodywho.ai/posts/jev-in-
 answer letters instead of sampling. The softmax over just those
 letters is the decision, with a probability for each choice.
 
+Inference is done via [llama.cpp](https://github.com/ggml-org/llama.cpp).
+
 ## Building
 
 ```bash
@@ -99,37 +129,44 @@ per given answer.
 
 When developing use `cargo run --release -- decide …` instead of plain `cargo run`.
 
+llama.cpp is compiled in, so the build needs cmake, a C++ compiler, and for
+the default Vulkan backend the Vulkan and SPIR-V headers and `glslc`. On
+Arch that's `cmake clang vulkan-headers spirv-headers shaderc`; on Debian
+and Ubuntu `cmake g++ libvulkan-dev spirv-headers glslc`. `--no-default-features` builds a CPU-only binary with
+none of the Vulkan requirements, and `--features cuda`, `rocm`, or `metal`
+swap the GPU backend.
+
 ## Benchmark
 
 `script/benchmark` times every pulled model on the phishing example above and
-prints a table like this one. Load is what a one-off `decide` pays before it
-answers; `play` pays it once.
+prints a table like the ones below. Load is what a one-off `decide` pays
+before it answers; `play` pays it once. `DEVICE=cpu script/benchmark` picks
+the device the same way `--device` does.
 
 ```
 CPU: AMD Ryzen 9 9950X3D 16-Core Processor
+Device: auto
+Running on AMD Radeon RX 7900 XTX (RADV NAVI31) (Vulkan).
 20 answers of "Payroll asks for your password on a non-company sign-in page." between Legitimate Spam Phishing
 
 | Model      | Load   | Per answer | Answers/s |
 |------------|--------|------------|-----------|
-| qwen3-0.6b | 0.61 s | 136 ms     | 7.4       |
-| qwen3-1.7b | 1.12 s | 300 ms     | 3.3       |
+| qwen3-0.6b | 0.47 s | 14 ms      | 70.3      |
+| qwen3-1.7b | 0.64 s | 17 ms      | 58.0      |
 ```
 
-## Embedding
-
-tinyclass is a library with a thin binary on top, the same shape as
-[ax](https://github.com/monorkin/ax) and [katami](https://github.com/monorkin/katami).
-A program that links it calls `tinyclass::decision::decide` or
-`tinyclass::decision::noul` with a `Model::current().load()`, or reuses whole
-commands through `tinyclass::cli::run`. Before it touches either, it says
-where its models live and what it's called, once:
-
-```rust
-tinyclass::settings::configure(tinyclass::settings::Settings {
-    data_dir: Some(my_data_dir.join("tinyclass")),
-    invoked_as: Some("anna classify".to_string()),
-});
 ```
+Device: cpu
+Running on CPU.
+
+| Model      | Load   | Per answer | Answers/s |
+|------------|--------|------------|-----------|
+| qwen3-0.6b | 0.41 s | 35 ms      | 28.6      |
+| qwen3-1.7b | 0.47 s | 85 ms      | 11.8      |
+```
+
+Most of the load time is the Vulkan driver coming up, about 0.35 s here,
+which a CPU-only build (`--no-default-features`) skips.
 
 ## License
 

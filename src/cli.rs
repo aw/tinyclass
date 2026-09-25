@@ -1,12 +1,14 @@
 //! The command line: what `tinyclass` understands and what each command runs.
 
 use anyhow::Result;
+use llama_cpp_2::LlamaBackendDeviceType;
 use std::io::{self, BufRead, Write};
 use usage::{Cli, Subcommands};
 
 use crate::completions;
 use crate::config::Config;
 use crate::decision::{self, Decision};
+use crate::device::{self, Choice};
 use crate::model::{self, Model};
 use crate::paths;
 
@@ -25,6 +27,11 @@ pub enum Command {
         #[usage(subcommand)]
         command: ModelCommand,
     },
+    /// Choose and list the CPU and GPUs the model can run on
+    Device {
+        #[usage(subcommand)]
+        command: DeviceCommand,
+    },
     /// Decide once: classify an input into one of the choices
     Decide {
         /// The text to decide about
@@ -34,6 +41,9 @@ pub enum Command {
         /// What the model is told to do with the input
         #[usage(long, default = "Choose one option.")]
         instruction: String,
+        /// Where to run: auto, cpu, gpu, or gpu:N; defaults to the set device
+        #[usage(long)]
+        device: Option<String>,
         /// Print the decision as JSON
         #[usage(long)]
         json: bool,
@@ -45,6 +55,9 @@ pub enum Command {
         /// What the model is told to do with the statement
         #[usage(long, default = "Is the statement true?")]
         instruction: String,
+        /// Where to run: auto, cpu, gpu, or gpu:N; defaults to the set device
+        #[usage(long)]
+        device: Option<String>,
         /// Print the probability as JSON
         #[usage(long)]
         json: bool,
@@ -56,6 +69,9 @@ pub enum Command {
         /// What the model is told to do with each line
         #[usage(long, default = "Choose one option.")]
         instruction: String,
+        /// Where to run: auto, cpu, gpu, or gpu:N; defaults to the set device
+        #[usage(long)]
+        device: Option<String>,
     },
     /// Print or install the shell completion script
     ShellCompletion {
@@ -77,6 +93,17 @@ pub enum ModelCommand {
     Pull {
         /// A name from `tinyclass model list`; defaults to the set model
         name: Option<String>,
+    },
+}
+
+#[derive(Subcommands)]
+pub enum DeviceCommand {
+    /// List the devices llama.cpp sees, with the index `gpu:N` refers to
+    List,
+    /// Make a device the one the model runs on: auto, cpu, gpu, or gpu:N
+    Set {
+        /// auto, cpu, gpu, or gpu:N from `tinyclass device list`
+        device: String,
     },
 }
 
@@ -116,9 +143,17 @@ pub fn run(cli: Cli) -> Result<()> {
             ModelCommand::Set { name } => set_model(&name),
             ModelCommand::Pull { name } => pull_model(name.as_deref()),
         },
-        Command::Decide { input, choices, instruction, json } => decide(&input, &choices, &instruction, json),
-        Command::Noul { statement, instruction, json } => noul(&statement, &instruction, json),
-        Command::Play { choices, instruction } => play(&choices, &instruction),
+        Command::Device { command } => match command {
+            DeviceCommand::List => list_devices(),
+            DeviceCommand::Set { device } => set_device(&device),
+        },
+        Command::Decide { input, choices, instruction, device, json } => {
+            decide(&input, &choices, &instruction, device.as_deref(), json)
+        }
+        Command::Noul { statement, instruction, device, json } => {
+            noul(&statement, &instruction, device.as_deref(), json)
+        }
+        Command::Play { choices, instruction, device } => play(&choices, &instruction, device.as_deref()),
         Command::ShellCompletion { command } => match command {
             ShellCompletionCommand::Print { shell } => completions::print(&shell),
             ShellCompletionCommand::Install { shell } => completions::install(&shell),
@@ -171,9 +206,40 @@ fn pull_model(name: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn decide(input: &str, choices: &[String], instruction: &str, json: bool) -> Result<()> {
-    let mut model = Model::current()?.load()?;
-    let decision = decision::decide(&mut model, instruction, input, choices)?;
+fn list_devices() -> Result<()> {
+    model::backend()?;
+    let choice = Choice::current(None)?;
+    let chosen = choice.place()?.device.map(|it| it.index);
+    println!("Set: {choice}");
+    for device in device::all() {
+        let mut marker = " ";
+        if chosen == Some(device.index) || (chosen.is_none() && device.device_type == LlamaBackendDeviceType::Cpu) {
+            marker = "*";
+        }
+        let mut memory = String::new();
+        if device.memory_total > 0 {
+            memory = format!("{:.1} GB", device.memory_total as f64 / 1e9);
+        }
+        println!("{marker} {:<3} {:<8} {:<40} {memory}", device.index, device.backend, device.description);
+    }
+    Ok(())
+}
+
+fn set_device(text: &str) -> Result<()> {
+    let choice = Choice::parse(text)?;
+    model::backend()?;
+    let placement = choice.place()?;
+
+    let mut config = Config::load()?;
+    config.device = Some(choice.to_string());
+    config.save()?;
+    println!("{choice} is set — the model runs on {placement}.");
+    Ok(())
+}
+
+fn decide(input: &str, choices: &[String], instruction: &str, device: Option<&str>, json: bool) -> Result<()> {
+    let model = Model::current()?.load(Choice::current(device)?)?;
+    let decision = decision::decide(&model, instruction, input, choices)?;
     if json {
         print_json(&decision)?;
     } else {
@@ -182,9 +248,9 @@ fn decide(input: &str, choices: &[String], instruction: &str, json: bool) -> Res
     Ok(())
 }
 
-fn noul(statement: &str, instruction: &str, json: bool) -> Result<()> {
-    let mut model = Model::current()?.load()?;
-    let probability = decision::noul(&mut model, instruction, statement)?;
+fn noul(statement: &str, instruction: &str, device: Option<&str>, json: bool) -> Result<()> {
+    let model = Model::current()?.load(Choice::current(device)?)?;
+    let probability = decision::noul(&model, instruction, statement)?;
     if json {
         println!("{}", serde_json::json!({ "probability": probability }));
     } else {
@@ -193,10 +259,11 @@ fn noul(statement: &str, instruction: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn play(choices: &[String], instruction: &str) -> Result<()> {
+fn play(choices: &[String], instruction: &str, device: Option<&str>) -> Result<()> {
     let current = Model::current()?;
     eprintln!("Loading {}…", current.name);
-    let mut model = current.load()?;
+    let model = current.load(Choice::current(device)?)?;
+    eprintln!("Running on {}.", model.placement);
     eprintln!("Deciding between {} for every line; Ctrl-D ends.", choices.join(", "));
 
     let stdin = io::stdin();
@@ -211,7 +278,7 @@ fn play(choices: &[String], instruction: &str) -> Result<()> {
         }
         let input = line.trim();
         if !input.is_empty() {
-            print_decision(&decision::decide(&mut model, instruction, input, choices)?);
+            print_decision(&decision::decide(&model, instruction, input, choices)?);
         }
     }
     Ok(())

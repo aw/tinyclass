@@ -11,10 +11,14 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 ureq = { version = "3.4.0", features = ["json"] }
 usage = { version = "6", package = "usage-rs", features = ["completions"] }
-candle-core = "0.11.0"
-candle-transformers = "0.11.0"
-# candle-core already builds this tokenizers with onig, so the model shares it
-tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+llama-cpp-2 = "0.1.157"
+
+[features]
+default = ["vulkan"]
+vulkan = ["llama-cpp-2/vulkan"]
+cuda = ["llama-cpp-2/cuda"]
+metal = ["llama-cpp-2/metal"]
+rocm = ["llama-cpp-2/rocm"]
 
 [profile.release]
 lto = true

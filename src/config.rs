@@ -1,4 +1,4 @@
-//! The one setting: which model answers.
+//! The settings: which model answers, and where it runs.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,8 @@ use crate::paths;
 #[serde(rename_all = "camelCase")]
 pub struct Config {
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
 }
 
 impl Config {

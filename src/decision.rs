@@ -2,10 +2,13 @@
 //! stop after the prompt, and read the logits of the answer letters instead
 //! of sampling. The softmax over just those letters is the decision.
 
-use anyhow::{Result, anyhow, bail};
-use candle_core::Tensor;
+use anyhow::{Context, Result, bail};
+use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::llama_batch::LlamaBatch;
+use llama_cpp_2::model::AddBos;
+use std::num::NonZeroU32;
 
-use crate::model::Loaded;
+use crate::model::{self, Loaded};
 
 const LABELS: [char; 26] = [
     'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R',
@@ -34,13 +37,13 @@ impl Decision {
 
 /// Jev's yes/no question, named after the Bernoulli distribution: how likely
 /// the statement is true, as one number between 0 and 1.
-pub fn noul(model: &mut Loaded, instruction: &str, statement: &str) -> Result<f32> {
+pub fn noul(model: &Loaded, instruction: &str, statement: &str) -> Result<f32> {
     let choices = ["Yes".to_string(), "No".to_string()];
     let decision = decide(model, instruction, statement, &choices)?;
     Ok(decision.scores[0].probability)
 }
 
-pub fn decide(model: &mut Loaded, instruction: &str, input: &str, choices: &[String]) -> Result<Decision> {
+pub fn decide(model: &Loaded, instruction: &str, input: &str, choices: &[String]) -> Result<Decision> {
     if choices.len() < 2 {
         bail!("a decision needs at least two choices");
     }
@@ -85,24 +88,47 @@ fn prompt(instruction: &str, input: &str, choices: &[String]) -> String {
     )
 }
 
-fn last_token_logits(model: &mut Loaded, prompt: &str) -> Result<Vec<f32>> {
-    let encoding = model
-        .tokenizer
-        .encode(prompt, false)
-        .map_err(|error| anyhow!("could not tokenize the prompt: {error}"))?;
-    let input = Tensor::new(encoding.get_ids(), &model.device)?.unsqueeze(0)?;
+/// One context per question, sized to the prompt: the whole prompt goes in
+/// as a single batch and only its last position keeps logits.
+fn last_token_logits(model: &Loaded, prompt: &str) -> Result<Vec<f32>> {
+    let tokens = model
+        .model
+        .str_to_token(prompt, AddBos::Never)
+        .context("could not tokenize the prompt")?;
+    let length = u32::try_from(tokens.len())?;
+    let threads = i32::try_from(model::physical_cores())?;
 
-    model.weights.clear_kv_cache();
-    let logits = model.weights.forward(&input, 0)?.squeeze(0)?;
-    Ok(logits.to_vec1::<f32>()?)
+    let on_cpu = model.placement.device.is_none();
+    let params = LlamaContextParams::default()
+        .with_n_ctx(NonZeroU32::new(length))
+        .with_n_batch(length)
+        .with_n_ubatch(length)
+        .with_n_threads(threads)
+        .with_n_threads_batch(threads)
+        .with_op_offload(!on_cpu)
+        .with_offload_kqv(!on_cpu)
+        .with_no_perf(true);
+    let mut context = model
+        .model
+        .new_context(model.backend, params)
+        .context("could not create a context for the prompt")?;
+
+    let mut batch = LlamaBatch::new(tokens.len(), 1);
+    let last = tokens.len() - 1;
+    for (position, token) in tokens.iter().enumerate() {
+        batch.add(*token, i32::try_from(position)?, &[0], position == last)?;
+    }
+    context.decode(&mut batch).context("could not run the prompt")?;
+
+    Ok(context.get_logits_ith(i32::try_from(last)?).to_vec())
 }
 
 fn label_token(model: &Loaded, label: char) -> Result<usize> {
-    let encoding = model
-        .tokenizer
-        .encode(label.to_string(), false)
-        .map_err(|error| anyhow!("could not tokenize '{label}': {error}"))?;
-    Ok(encoding.get_ids()[0] as usize)
+    let tokens = model
+        .model
+        .str_to_token(&label.to_string(), AddBos::Never)
+        .with_context(|| format!("could not tokenize '{label}'"))?;
+    Ok(usize::try_from(tokens[0].0)?)
 }
 
 fn log_sum_exp(values: &[f32]) -> f32 {

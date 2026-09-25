@@ -1,62 +1,59 @@
-//! The Qwen3 models tinyclass knows how to run: a GGUF from Qwen's quantized repo
-//! and the tokenizer from the matching base repo, fetched once into the data
-//! folder. Nothing downloads on the answering path.
+//! The Qwen3 models tinyclass knows how to run: a GGUF from Qwen's quantized
+//! repo, fetched once into the data folder. The tokenizer and chat template
+//! travel inside the file. Nothing downloads on the answering path.
 
 use anyhow::{Context, Result, anyhow, bail};
-use candle_core::Device;
-use candle_core::quantized::gguf_file;
-use candle_transformers::models::quantized_qwen3::ModelWeights;
+use llama_cpp_2::llama_backend::LlamaBackend;
+use llama_cpp_2::model::LlamaModel;
+use llama_cpp_2::model::params::LlamaModelParams;
+use llama_cpp_2::{LogOptions, send_logs_to_tracing};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
-use tokenizers::Tokenizer;
+use std::sync::OnceLock;
 
 use crate::config::Config;
+use crate::device::{Choice, Placement};
 use crate::paths;
 
 pub struct Model {
     pub name: &'static str,
-    pub gguf_repo: &'static str,
-    pub gguf_file: &'static str,
-    pub tokenizer_repo: &'static str,
+    pub repo: &'static str,
+    pub file: &'static str,
     pub size: &'static str,
 }
 
 pub const CATALOG: &[Model] = &[
     Model {
         name: "qwen3-0.6b",
-        gguf_repo: "Qwen/Qwen3-0.6B-GGUF",
-        gguf_file: "Qwen3-0.6B-Q8_0.gguf",
-        tokenizer_repo: "Qwen/Qwen3-0.6B",
+        repo: "Qwen/Qwen3-0.6B-GGUF",
+        file: "Qwen3-0.6B-Q8_0.gguf",
         size: "640 MB",
     },
     Model {
         name: "qwen3-1.7b",
-        gguf_repo: "Qwen/Qwen3-1.7B-GGUF",
-        gguf_file: "Qwen3-1.7B-Q8_0.gguf",
-        tokenizer_repo: "Qwen/Qwen3-1.7B",
+        repo: "Qwen/Qwen3-1.7B-GGUF",
+        file: "Qwen3-1.7B-Q8_0.gguf",
         size: "1.8 GB",
     },
     Model {
         name: "qwen3-4b",
-        gguf_repo: "Qwen/Qwen3-4B-GGUF",
-        gguf_file: "Qwen3-4B-Q8_0.gguf",
-        tokenizer_repo: "Qwen/Qwen3-4B",
+        repo: "Qwen/Qwen3-4B-GGUF",
+        file: "Qwen3-4B-Q8_0.gguf",
         size: "4.3 GB",
     },
     Model {
         name: "qwen3-8b",
-        gguf_repo: "Qwen/Qwen3-8B-GGUF",
-        gguf_file: "Qwen3-8B-Q8_0.gguf",
-        tokenizer_repo: "Qwen/Qwen3-8B",
+        repo: "Qwen/Qwen3-8B-GGUF",
+        file: "Qwen3-8B-Q8_0.gguf",
         size: "8.7 GB",
     },
 ];
 
 pub struct Loaded {
-    pub tokenizer: Tokenizer,
-    pub weights: ModelWeights,
-    pub device: Device,
+    pub backend: &'static LlamaBackend,
+    pub model: LlamaModel,
+    pub placement: Placement,
 }
 
 impl Model {
@@ -78,44 +75,37 @@ impl Model {
     }
 
     pub fn available(&self) -> bool {
-        self.gguf_path().exists() && self.tokenizer_path().exists()
+        self.path().exists()
     }
 
     pub fn pull(&self) -> Result<()> {
         fs::create_dir_all(self.directory())
             .with_context(|| format!("could not create {}", self.directory().display()))?;
-
-        self.fetch(self.tokenizer_repo, "tokenizer.json", &self.tokenizer_path())?;
-        self.fetch(self.gguf_repo, self.gguf_file, &self.gguf_path())?;
-        Ok(())
+        self.fetch()
     }
 
-    pub fn load(&self) -> Result<Loaded> {
+    pub fn load(&self, choice: Choice) -> Result<Loaded> {
         if !self.available() {
             bail!("{} isn't on disk yet — fetch it with `{} model pull`", self.name, paths::invoked_as());
         }
 
-        let tokenizer = Tokenizer::from_file(self.tokenizer_path()).map_err(|error| {
-            anyhow!("could not load {}: {error}", self.tokenizer_path().display())
-        })?;
-
-        let device = Device::Cpu;
-        let mut file = File::open(self.gguf_path())
-            .with_context(|| format!("could not open {}", self.gguf_path().display()))?;
-        let content = gguf_file::Content::read(&mut file)
-            .with_context(|| format!("could not read {}", self.gguf_path().display()))?;
-        let weights = ModelWeights::from_gguf(content, &mut file, &device)
-            .with_context(|| format!("could not load {}", self.gguf_path().display()))?;
-
-        Ok(Loaded { tokenizer, weights, device })
-    }
-
-    fn fetch(&self, repo: &str, file: &str, destination: &PathBuf) -> Result<()> {
-        if destination.exists() {
-            return Ok(());
+        let backend = backend()?;
+        let placement = choice.place()?;
+        let mut params = LlamaModelParams::default();
+        if let Some(device) = &placement.device {
+            params = params.with_n_gpu_layers(u32::MAX).with_devices(&[device.index])?;
+        } else {
+            params = params.with_n_gpu_layers(0);
         }
 
-        let url = format!("https://huggingface.co/{repo}/resolve/main/{file}");
+        let model = LlamaModel::load_from_file(backend, self.path(), &params)
+            .with_context(|| format!("could not load {}", self.path().display()))?;
+        Ok(Loaded { backend, model, placement })
+    }
+
+    fn fetch(&self) -> Result<()> {
+        let destination = self.path();
+        let url = format!("https://huggingface.co/{}/resolve/main/{}", self.repo, self.file);
         let mut response = ureq::get(&url)
             .call()
             .with_context(|| format!("could not download {url}"))?;
@@ -139,24 +129,43 @@ impl Model {
             output.write_all(&buffer[..read])?;
             received += read as u64;
             if received - reported >= 10_000_000 {
-                report_progress(file, received, total);
+                report_progress(self.file, received, total);
                 reported = received;
             }
         }
-        report_progress(file, received, total);
+        report_progress(self.file, received, total);
         eprintln!();
 
         fs::rename(&temporary, destination)?;
         Ok(())
     }
 
-    fn gguf_path(&self) -> PathBuf {
-        self.directory().join(self.gguf_file)
+    fn path(&self) -> PathBuf {
+        self.directory().join(self.file)
     }
+}
 
-    fn tokenizer_path(&self) -> PathBuf {
-        self.directory().join("tokenizer.json")
+/// llama.cpp is initialized once per process and narrates every load to
+/// stderr unless told not to; the device list needs it up as well.
+pub fn backend() -> Result<&'static LlamaBackend> {
+    static BACKEND: OnceLock<LlamaBackend> = OnceLock::new();
+    if BACKEND.get().is_none() {
+        send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
+        let backend = LlamaBackend::init().context("could not initialize llama.cpp")?;
+        BACKEND.set(backend).ok();
     }
+    Ok(BACKEND.get().expect("the backend was just initialized"))
+}
+
+/// llama.cpp defaults to four threads. The matmuls are memory-bound, so a
+/// second thread per core only adds contention: one per physical core is
+/// the fast setting.
+pub fn physical_cores() -> usize {
+    let hardware_threads = std::thread::available_parallelism().map(|it| it.get()).unwrap_or(1);
+    let threads_per_core = fs::read_to_string("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list")
+        .map(|it| it.trim().split(',').count())
+        .unwrap_or(1);
+    (hardware_threads / threads_per_core).max(1)
 }
 
 fn report_progress(file: &str, received: u64, total: Option<u64>) {

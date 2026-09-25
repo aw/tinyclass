@@ -1,4 +1,5 @@
-# candle picks its AVX-512 kernels at compile time, so a generic x86-64 build
-# runs the quantized matmuls as scalar code, about four times slower
-[build]
-rustflags = ["-C", "target-cpu=native"]
+# llama.cpp reads this and turns on the matching GGML AVX options, so the
+# CPU kernels aren't built for baseline x86-64. v3 is AVX2 and FMA, every
+# x86 CPU since 2013, and measures the same as native.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]

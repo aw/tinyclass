@@ -2,6 +2,7 @@ pub mod cli;
 pub mod completions;
 pub mod config;
 pub mod decision;
+pub mod device;
 pub mod fsutil;
 pub mod model;
 pub mod paths;

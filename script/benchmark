@@ -13,6 +13,7 @@ cd "$(dirname "$0")/.."
 ANSWERS=${ANSWERS:-20}
 INPUT="Payroll asks for your password on a non-company sign-in page."
 CHOICES=(Legitimate Spam Phishing)
+DEVICE=${DEVICE:-auto}
 
 cargo build --release --quiet
 binary=target/release/$BINARY
@@ -21,7 +22,7 @@ seconds_for_lines() {
   local lines=$1
   local start end
   start=$(date +%s.%N)
-  for ((i = 0; i < lines; i++)); do echo "$INPUT"; done | "$binary" play "${CHOICES[@]}" >/dev/null 2>&1
+  for ((i = 0; i < lines; i++)); do echo "$INPUT"; done | "$binary" play "${CHOICES[@]}" --device "$DEVICE" >/dev/null 2>&1
   end=$(date +%s.%N)
   awk "BEGIN { print $end - $start }"
 }
@@ -39,6 +40,8 @@ restore_model() {
 trap restore_model EXIT
 
 echo "CPU: $(lscpu | awk -F: '/Model name/ { gsub(/^ +/, "", $2); print $2 }')"
+echo "Device: $DEVICE"
+printf '' | "$binary" play A B --device "$DEVICE" 2>&1 | grep '^Running on'
 echo "$ANSWERS answers of \"$INPUT\" between ${CHOICES[*]}"
 echo
 echo "| Model | Load | Per answer | Answers/s |"
