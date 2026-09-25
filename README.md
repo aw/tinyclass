@@ -125,12 +125,13 @@ per given answer.
 
 When developing use `cargo run --release -- decide …` instead of plain `cargo run`.
 
-llama.cpp is compiled in, so the build needs cmake, a C++ compiler, and for
-the default Vulkan backend the Vulkan and SPIR-V headers and `glslc`. On
-Arch that's `cmake clang vulkan-headers spirv-headers shaderc`; on Debian
-and Ubuntu `cmake g++ libvulkan-dev spirv-headers glslc`. `--no-default-features` builds a CPU-only binary with
-none of the Vulkan requirements, and `--features cuda`, `rocm`, or `metal`
-swap the GPU backend.
+llama.cpp is compiled in, so the build needs cmake and a C++ compiler. On
+Linux the Vulkan backend also needs the Vulkan and SPIR-V headers and
+`glslc`: on Arch that's `cmake clang vulkan-headers spirv-headers shaderc`,
+on Debian and Ubuntu `cmake g++ libvulkan-dev spirv-headers glslc`. On
+macOS the Xcode command line tools and `brew install cmake` are enough;
+Metal is the backend there. `--features cuda` or `rocm` add those backends
+on Linux.
 
 ## Benchmark
 
@@ -162,7 +163,7 @@ Running on CPU.
 ```
 
 Most of the load time is the Vulkan driver coming up, about 0.35 s here,
-which a CPU-only build (`--no-default-features`) skips.
+which is paid even when the CPU is chosen.
 
 ## License
 

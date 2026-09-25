@@ -13,11 +13,13 @@ ureq = { version = "3.4.0", features = ["json"] }
 usage = { version = "6", package = "usage-rs", features = ["completions"] }
 llama-cpp-2 = "0.1.157"
 
+# Vulkan is the GPU backend everywhere but macOS, where llama.cpp turns Metal
+# on by itself; cuda and rocm are opt-in for machines that have them
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+llama-cpp-2 = { version = "0.1.157", features = ["vulkan"] }
+
 [features]
-default = ["vulkan"]
-vulkan = ["llama-cpp-2/vulkan"]
 cuda = ["llama-cpp-2/cuda"]
-metal = ["llama-cpp-2/metal"]
 rocm = ["llama-cpp-2/rocm"]
 
 [profile.release]

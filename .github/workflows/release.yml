@@ -6,7 +6,8 @@ on:
   workflow_dispatch:
 
 # glibc rather than musl: llama.cpp's Vulkan backend is C++ against the
-# system loader, and building that against musl isn't worth the fight.
+# system loader, and building that against musl isn't worth the fight. The
+# macOS runner has cmake and the Metal toolchain already.
 jobs:
   build:
     strategy:
@@ -16,11 +17,14 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+          - runner: macos-15
+            target: aarch64-apple-darwin
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
 
       - name: Install the llama.cpp build dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install --yes cmake libvulkan-dev glslc spirv-headers

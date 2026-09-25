@@ -159,7 +159,8 @@ pub fn backend() -> Result<&'static LlamaBackend> {
 
 /// llama.cpp defaults to four threads. The matmuls are memory-bound, so a
 /// second thread per core only adds contention: one per physical core is
-/// the fast setting.
+/// the fast setting. Only Linux says how many threads share a core; Apple
+/// silicon has no SMT, so counting every hardware thread is right there.
 pub fn physical_cores() -> usize {
     let hardware_threads = std::thread::available_parallelism().map(|it| it.get()).unwrap_or(1);
     let threads_per_core = fs::read_to_string("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list")
