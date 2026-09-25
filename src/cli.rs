@@ -11,6 +11,7 @@ use crate::decision::{self, Decision};
 use crate::device::{self, Choice};
 use crate::model::{self, Model};
 use crate::paths;
+use crate::upgrade;
 
 /// A local decision model out of Qwen3: pick one of N choices with a probability for each
 #[derive(Cli)]
@@ -72,6 +73,11 @@ pub enum Command {
         /// Where to run: auto, cpu, gpu, or gpu:N; defaults to the set device
         #[usage(long)]
         device: Option<String>,
+    },
+    /// Upgrade a mise install to the latest release
+    Upgrade {
+        /// Target a specific release instead of the latest
+        version: Option<String>,
     },
     /// Print or install the shell completion script
     ShellCompletion {
@@ -154,6 +160,7 @@ pub fn run(cli: Cli) -> Result<()> {
             noul(&statement, &instruction, device.as_deref(), json)
         }
         Command::Play { choices, instruction, device } => play(&choices, &instruction, device.as_deref()),
+        Command::Upgrade { version } => upgrade::run(version.as_deref()),
         Command::ShellCompletion { command } => match command {
             ShellCompletionCommand::Print { shell } => completions::print(&shell),
             ShellCompletionCommand::Install { shell } => completions::install(&shell),

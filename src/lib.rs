@@ -7,3 +7,4 @@ pub mod fsutil;
 pub mod model;
 pub mod paths;
 pub mod settings;
+pub mod upgrade;

@@ -96,6 +96,8 @@ tinyclass model pull           # fetch it from Hugging Face
 tinyclass device list          # the CPU and GPUs llama.cpp sees
 tinyclass device set gpu       # auto (the default), cpu, gpu, or gpu:N
 tinyclass decide "…" A B --device cpu   # override for one run
+
+tinyclass upgrade              # move a mise install to the latest release
 ```
 
 Models live under `~/.local/share/tinyclass/models`, or `$XDG_DATA_HOME/tinyclass`.
