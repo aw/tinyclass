@@ -1,0 +1,4 @@
+# candle picks its AVX-512 kernels at compile time, so a generic x86-64 build
+# runs the quantized matmuls as scalar code, about four times slower
+[build]
+rustflags = ["-C", "target-cpu=native"]

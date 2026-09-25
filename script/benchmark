@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+#
+# How fast tinyclass answers, per pulled model, as a Markdown table.
+#
+# Load time comes from a single-answer `play` run; the per-answer time from
+# the difference between that and a run of ANSWERS+1 lines, so the load is
+# subtracted out. Every run classifies the same phishing example.
+
+set -euo pipefail
+cd "$(dirname "$0")/.."
+. ./script/lib
+
+ANSWERS=${ANSWERS:-20}
+INPUT="Payroll asks for your password on a non-company sign-in page."
+CHOICES=(Legitimate Spam Phishing)
+
+cargo build --release --quiet
+binary=target/release/$BINARY
+
+seconds_for_lines() {
+  local lines=$1
+  local start end
+  start=$(date +%s.%N)
+  for ((i = 0; i < lines; i++)); do echo "$INPUT"; done | "$binary" play "${CHOICES[@]}" >/dev/null 2>&1
+  end=$(date +%s.%N)
+  awk "BEGIN { print $end - $start }"
+}
+
+pulled_models() {
+  "$binary" model list | awk '$NF == "pulled" && $(NF-1) != "not" { print $(NF-3) }'
+}
+
+current_model=$("$binary" model list | awk '$1 == "*" { print $2 }')
+restore_model() {
+  if [ -n "$current_model" ]; then
+    "$binary" model set "$current_model" >/dev/null
+  fi
+}
+trap restore_model EXIT
+
+echo "CPU: $(lscpu | awk -F: '/Model name/ { gsub(/^ +/, "", $2); print $2 }')"
+echo "$ANSWERS answers of \"$INPUT\" between ${CHOICES[*]}"
+echo
+echo "| Model | Load | Per answer | Answers/s |"
+echo "|---|---|---|---|"
+
+for model in $(pulled_models); do
+  "$binary" model set "$model" >/dev/null
+  seconds_for_lines 1 >/dev/null
+
+  one=$(seconds_for_lines 1)
+  many=$(seconds_for_lines $((ANSWERS + 1)))
+  awk -v model="$model" -v one="$one" -v many="$many" -v answers="$ANSWERS" 'BEGIN {
+    per_answer = (many - one) / answers
+    load = one - per_answer
+    printf "| %s | %.2f s | %.0f ms | %.1f |\n", model, load, per_answer * 1000, 1 / per_answer
+  }'
+done

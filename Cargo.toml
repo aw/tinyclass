@@ -1,0 +1,21 @@
+[package]
+name = "tinyclass"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0.104"
+dirs = "6.0.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+ureq = { version = "3.4.0", features = ["json"] }
+usage = { version = "6", package = "usage-rs", features = ["completions"] }
+candle-core = "0.11.0"
+candle-transformers = "0.11.0"
+# candle-core already builds this tokenizers with onig, so the model shares it
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
