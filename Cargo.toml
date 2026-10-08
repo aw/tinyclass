@@ -12,6 +12,7 @@ serde_json = "1.0.151"
 ureq = { version = "3.4.0", features = ["json"] }
 usage = { version = "6", package = "usage-rs", features = ["completions"] }
 llama-cpp-2 = "0.1.157"
+url = "2.5"
 
 # Vulkan is the GPU backend everywhere but macOS, where llama.cpp turns Metal
 # on by itself; cuda and rocm are opt-in for machines that have them

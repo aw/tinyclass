@@ -1,15 +1,15 @@
 //! The command line: what `tinyclass` understands and what each command runs.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use llama_cpp_2::LlamaBackendDeviceType;
 use std::io::{self, BufRead, Write};
 use usage::{Cli, Subcommands};
 
 use crate::completions;
-use crate::config::Config;
+use crate::config::{Config, Backend};
 use crate::decision::{self, Decision};
 use crate::device::{self, Choice};
-use crate::model::{self, Model};
+use crate::model::{self, Loaded, Model};
 use crate::paths;
 use crate::upgrade;
 
@@ -28,6 +28,16 @@ pub enum Command {
         #[usage(subcommand)]
         command: ModelCommand,
     },
+    /// Configure the ollama server URL and list/resolve remote models
+    Host {
+        #[usage(subcommand)]
+        command: HostCommand,
+    },
+    /// Switch between llama-cpp and ollama backends
+    Backend {
+        #[usage(subcommand)]
+        command: BackendCommand,
+    },
     /// Choose and list the CPU and GPUs the model can run on
     Device {
         #[usage(subcommand)]
@@ -45,6 +55,9 @@ pub enum Command {
         /// Where to run: auto, cpu, gpu, or gpu:N; defaults to the set device
         #[usage(long)]
         device: Option<String>,
+        /// Which backend to use: llama-cpp (local GGUF) or ollama (remote server)
+        #[usage(long)]
+        backend: Option<String>,
         /// Print the decision as JSON
         #[usage(long)]
         json: bool,
@@ -59,6 +72,9 @@ pub enum Command {
         /// Where to run: auto, cpu, gpu, or gpu:N; defaults to the set device
         #[usage(long)]
         device: Option<String>,
+        /// Which backend to use: llama-cpp (local GGUF) or ollama (remote server)
+        #[usage(long)]
+        backend: Option<String>,
         /// Print the probability as JSON
         #[usage(long)]
         json: bool,
@@ -73,6 +89,9 @@ pub enum Command {
         /// Where to run: auto, cpu, gpu, or gpu:N; defaults to the set device
         #[usage(long)]
         device: Option<String>,
+        /// Which backend to use: llama-cpp (local GGUF) or ollama (remote server)
+        #[usage(long)]
+        backend: Option<String>,
     },
     /// Upgrade a mise install to the latest release
     Upgrade {
@@ -100,11 +119,46 @@ pub enum ModelCommand {
         /// A name from `tinyclass model list`; defaults to the set model
         name: Option<String>,
     },
+    /// Switch between llama-cpp and ollama backends
+    Backend {
+        #[usage(subcommand)]
+        command: BackendCommand,
+    },
+}
+
+#[derive(Subcommands)]
+pub enum HostCommand {
+    /// Configure the Ollama API URL
+    Set {
+        /// the Ollama API URL
+        url: String,
+    },
+    /// Remove the configured URL, reverting to the default
+    Clear,
+    /// Query the server and list available models
+    Models,
+    /// Pull a model onto the server
+    Pull {
+        /// Name of the model to pull
+        name: Option<String>,
+    },
+}
+
+#[derive(Subcommands)]
+pub enum BackendCommand {
+    /// Set the current backend
+    Set {
+        /// Which backend to use: llama-cpp or ollama
+        #[usage(choices("llama-cpp", "ollama"), choices_strict = false)]
+        backend: String,
+    },
+    /// Show the current backend
+    Get,
 }
 
 #[derive(Subcommands)]
 pub enum DeviceCommand {
-    /// List the devices llama.cpp sees, with the index `gpu:N` refers to
+    /// List the devices llama-cpp sees, with the index `gpu:N` refers to
     List,
     /// Make a device the one the model runs on: auto, cpu, gpu, or gpu:N
     Set {
@@ -148,18 +202,34 @@ pub fn run(cli: Cli) -> Result<()> {
             ModelCommand::List => list_models(),
             ModelCommand::Set { name } => set_model(&name),
             ModelCommand::Pull { name } => pull_model(name.as_deref()),
+            ModelCommand::Backend { command } => match command {
+                BackendCommand::Set { backend } => set_backend(&backend),
+                BackendCommand::Get => get_backend(),
+            },
+        },
+        Command::Host { command } => match command {
+            HostCommand::Set { url } => set_host(&url),
+            HostCommand::Clear => clear_host(),
+            HostCommand::Models => host_models(),
+            HostCommand::Pull { name } => host_pull(name.as_deref()),
+        },
+        Command::Backend { command } => match command {
+            BackendCommand::Set { backend } => set_backend(&backend),
+            BackendCommand::Get => get_backend(),
         },
         Command::Device { command } => match command {
             DeviceCommand::List => list_devices(),
             DeviceCommand::Set { device } => set_device(&device),
         },
-        Command::Decide { input, choices, instruction, device, json } => {
-            decide(&input, &choices, &instruction, device.as_deref(), json)
+        Command::Decide { input, choices, instruction, device, backend, json } => {
+            decide(&input, &choices, &instruction, device.as_deref(), backend.as_deref(), json)
         }
-        Command::Noul { statement, instruction, device, json } => {
-            noul(&statement, &instruction, device.as_deref(), json)
+        Command::Noul { statement, instruction, device, backend, json } => {
+            noul(&statement, &instruction, device.as_deref(), backend.as_deref(), json)
         }
-        Command::Play { choices, instruction, device } => play(&choices, &instruction, device.as_deref()),
+        Command::Play { choices, instruction, device, backend } => {
+            play(&choices, &instruction, device.as_deref(), backend.as_deref())
+        }
         Command::Upgrade { version } => upgrade::run(version.as_deref()),
         Command::ShellCompletion { command } => match command {
             ShellCompletionCommand::Print { shell } => completions::print(&shell),
@@ -169,47 +239,178 @@ pub fn run(cli: Cli) -> Result<()> {
 }
 
 fn list_models() -> Result<()> {
-    let current = Config::load()?.model;
+    let config = Config::load().ok();
+
+    // Local GGUF models
+    let current: Option<&str> = config.as_ref().and_then(|c| c.model.as_deref());
+    println!("llama-cpp backend");
     for model in model::CATALOG {
         let mut marker = " ";
-        if current.as_deref() == Some(model.name) {
+        if current == Some(model.name) {
             marker = "*";
         }
-        let mut state = "not pulled";
-        if model.available() {
-            state = "pulled";
-        }
+        let state = if model.available() { "pulled" } else { "not pulled" };
         println!("{marker} {:<12} {:>7}  {state}", model.name, model.size);
     }
+
+    // Remote ollama models
+    if let Some(url) = config.as_ref().and_then(|c| c.host.as_deref()) {
+        device::check_server(url).ok();
+        println!("ollama backend");
+        let remote = model::list_remote_models(url).ok();
+        if let Some(models) = remote {
+            for model in &models {
+                let mut marker = " ";
+                if current.as_deref() == Some(&model.name) {
+                    marker = "*";
+                }
+                println!("{marker} {}", model.name);
+            }
+        }
+    }
+
     Ok(())
 }
 
 fn set_model(name: &str) -> Result<()> {
-    let model = Model::find(name)?;
     let mut config = Config::load()?;
-    config.model = Some(model.name.to_string());
-    config.save()?;
 
-    if model.available() {
-        println!("{} is set.", model.name);
-    } else {
-        println!("{} is set — fetch it with `{} model pull`.", model.name, paths::invoked_as());
+    // Check if it's a local catalog model
+    if let Ok(model) = Model::find(name) {
+        config.model = Some(model.name.to_string());
+        config.save()?;
+        if model.available() {
+            println!("{} is set.", model.name);
+        } else {
+            println!("{} is set — fetch it with `{} model pull`.", model.name, paths::invoked_as());
+        }
+        return Ok(());
+    }
+
+    // Check if it's a remote model
+    if let Some(url) = Config::load().ok().and_then(|c| c.host).as_ref() {
+        let url = url.as_str();
+        device::check_server(url)?;
+        let remote = model::list_remote_models(url).ok();
+        if let Some(models) = remote {
+            if models.iter().any(|m| m.name == name) {
+                config.model = Some(name.to_string());
+                config.save()?;
+                println!("{} is set.", name);
+                return Ok(());
+            }
+        }
+    }
+
+    bail!("no model named '{}' — try `{} model list` to see what's available", name, paths::invoked_as());
+}
+
+fn pull_model(name: Option<&str>) -> Result<()> {
+    let given = name.unwrap_or("");
+
+    // Check if it's a local CATALOG model
+    if let Some(model) = Model::find(given).ok().or_else(|| Model::current().ok().filter(|_| name.is_none())) {
+        if model.available() {
+            println!("{} is already pulled.", model.name);
+        } else {
+            model.pull()?;
+            println!("{} is ready.", model.name);
+        }
+        return Ok(());
+    }
+
+    // Fall through to remote pull
+    if given.is_empty() {
+        bail!("no model name given and none configured — run `{} model list` first", paths::invoked_as());
+    }
+    host_pull(Some(given))
+}
+
+fn set_backend(target: &str) -> Result<()> {
+    let mut config = Config::load()?;
+    let value = if target == "ollama" { "ollama" } else { "llama-cpp" };
+    config.backend = Some(value.to_string());
+    config.save()?;
+    println!("Backend set to {}.", value);
+    Ok(())
+}
+
+fn get_backend() -> Result<()> {
+    let config = Config::load()?;
+    let backend = Backend::current(&config);
+    match backend {
+        Backend::Local => println!("llama-cpp"),
+        Backend::Remote => println!("ollama"),
     }
     Ok(())
 }
 
-fn pull_model(name: Option<&str>) -> Result<()> {
-    let model = match name {
-        Some(name) => Model::find(name)?,
-        None => Model::current()?,
-    };
+fn set_host(url: &str) -> Result<()> {
+    let parsed = url.parse::<url::Url>()
+        .map_err(|_| anyhow::anyhow!("invalid URL: {}", url))?;
 
-    if model.available() {
-        println!("{} is already pulled.", model.name);
-    } else {
-        model.pull()?;
-        println!("{} is ready.", model.name);
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        bail!("URL scheme must be http or https");
     }
+
+    let mut config = Config::load()?;
+    config.host = Some(url.to_string());
+    config.save()?;
+    println!("Ollama server set to {}.", url);
+    Ok(())
+}
+
+fn clear_host() -> Result<()> {
+    let mut config = Config::load()?;
+    config.host = None;
+    config.save()?;
+    println!("Ollama server URL cleared — will use {}.", "http://localhost:11434");
+    Ok(())
+}
+
+fn host_models() -> Result<()> {
+    let url = model::host();
+    eprintln!("Checking server at {}…", url);
+    device::check_server(&url)?;
+    let models = model::list_remote_models(&url)?;
+    if models.is_empty() {
+        eprintln!("No models on the server. Use `{} host pull <name>` to add one.", paths::invoked_as());
+    } else {
+        for model in &models {
+            println!("  {}", model.name);
+        }
+    }
+    Ok(())
+}
+
+fn host_pull(name: Option<&str>) -> Result<()> {
+    let url = model::host();
+    device::check_server(&url)?;
+    let model_name = match name {
+        Some(n) => n.to_string(),
+        None => Config::load().ok().and_then(|it| it.model).unwrap_or_default(),
+    };
+    if model_name.is_empty() {
+        bail!("no model name given and none configured — run `host models` first");
+    }
+    if model::host_has_model(&url, &model_name) {
+        println!("{} is already on the server.", model_name);
+        return Ok(());
+    }
+    let response = ureq::post(&format!("{url}/api/pull"))
+        .header("Content-Type", "application/json")
+        .send_json(serde_json::json!({
+            "name": model_name,
+            "stream": false,
+        }))
+        .map_err(|e| anyhow::anyhow!("could not pull {}: {e}", model_name))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.into_body().read_to_string().unwrap_or_default();
+        bail!("could not pull {}: status {status}: {}", model_name, body);
+    }
+    println!("{} is ready on the server.", model_name);
     Ok(())
 }
 
@@ -244,9 +445,42 @@ fn set_device(text: &str) -> Result<()> {
     Ok(())
 }
 
-fn decide(input: &str, choices: &[String], instruction: &str, device: Option<&str>, json: bool) -> Result<()> {
-    let model = Model::current()?.load(Choice::current(device)?)?;
-    let decision = decision::decide(&model, instruction, input, choices)?;
+/// Resolve which variant of Loaded to use: check backend flag, fall back to config.
+fn resolve_backend(flag: Option<&str>) -> Backend {
+    match flag {
+        Some("ollama") => Backend::Remote,
+        Some(_) | None => Config::load().ok().and_then(|c| c.backend)
+            .filter(|b| b == "ollama")
+            .map_or(Backend::Local, |_| Backend::Remote),
+    }
+}
+
+/// Load a Loaded handle according to the resolved backend.
+fn load_model(model: &Model, device: Option<&str>, backend: Option<&str>) -> Result<Loaded> {
+    match resolve_backend(backend) {
+        Backend::Remote => {
+            let url = model::host();
+            device::check_server(&url)?;
+            Ok(Loaded::Remote {
+                model_name: model.name.to_string(),
+                server_url: url,
+            })
+        }
+        Backend::Local => {
+            let loaded_local = model.load(Choice::current(device)?)?;
+            Ok(Loaded::Local {
+                backend: loaded_local.backend,
+                model: loaded_local.model,
+                placement: loaded_local.placement,
+                name: model.name,
+            })
+        }
+    }
+}
+
+fn decide(input: &str, choices: &[String], instruction: &str, device: Option<&str>, backend_flag: Option<&str>, json: bool) -> Result<()> {
+    let loaded = load_model(Model::current()?, device, backend_flag)?;
+    let decision = decision::decide(&loaded, instruction, input, choices)?;
     if json {
         print_json(&decision)?;
     } else {
@@ -255,9 +489,9 @@ fn decide(input: &str, choices: &[String], instruction: &str, device: Option<&st
     Ok(())
 }
 
-fn noul(statement: &str, instruction: &str, device: Option<&str>, json: bool) -> Result<()> {
-    let model = Model::current()?.load(Choice::current(device)?)?;
-    let probability = decision::noul(&model, instruction, statement)?;
+fn noul(statement: &str, instruction: &str, device: Option<&str>, backend_flag: Option<&str>, json: bool) -> Result<()> {
+    let loaded = load_model(Model::current()?, device, backend_flag)?;
+    let probability = decision::noul(&loaded, instruction, statement)?;
     if json {
         println!("{}", serde_json::json!({ "probability": probability }));
     } else {
@@ -266,11 +500,11 @@ fn noul(statement: &str, instruction: &str, device: Option<&str>, json: bool) ->
     Ok(())
 }
 
-fn play(choices: &[String], instruction: &str, device: Option<&str>) -> Result<()> {
+fn play(choices: &[String], instruction: &str, device: Option<&str>, backend_flag: Option<&str>) -> Result<()> {
     let current = Model::current()?;
     eprintln!("Loading {}…", current.name);
-    let model = current.load(Choice::current(device)?)?;
-    eprintln!("Running on {}.", model.placement);
+    let loaded = load_model(&current, device, backend_flag)?;
+    eprintln!("Running on {}.", loaded.model_name());
     eprintln!("Deciding between {} for every line; Ctrl-D ends.", choices.join(", "));
 
     let stdin = io::stdin();
@@ -285,7 +519,7 @@ fn play(choices: &[String], instruction: &str, device: Option<&str>) -> Result<(
         }
         let input = line.trim();
         if !input.is_empty() {
-            print_decision(&decision::decide(&model, instruction, input, choices)?);
+            print_decision(&decision::decide(&loaded, instruction, input, choices)?);
         }
     }
     Ok(())
