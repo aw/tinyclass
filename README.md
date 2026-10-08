@@ -93,6 +93,15 @@ tinyclass model list           # the Qwen3 sizes tinyclass knows
 tinyclass model set qwen3-1.7b # pick one
 tinyclass model pull           # fetch it from Hugging Face
 
+tinyclass backend              # show current backend
+tinyclass backend set llama-cpp # switch to local GGUF inference
+tinyclass backend set ollama    # switch to remote ollama server
+
+tinyclass host set http://localhost:11434  # configure ollama endpoint
+tinyclass host clear                       # reset to default
+tinyclass host models                      # list models on the server
+tinyclass host pull qwen3-1.7b             # download model to server
+
 tinyclass device list          # the CPU and GPUs llama.cpp sees
 tinyclass device set gpu       # auto (the default), cpu, gpu, or gpu:N
 tinyclass decide "…" A B --device cpu   # override for one run
@@ -139,7 +148,24 @@ on Linux.
 
 `script/benchmark` times every pulled model on the phishing example above and
 prints a table like the ones below. Load is what a one-off `decide` pays
-before it answers; `play` pays it once. `DEVICE=cpu script/benchmark` picks
+before it answers; `play` pays it once.
+
+### Ollama (remote)
+
+```
+Ollama server: http://localhost:11434
+20 answers of "Payroll asks for your password on a non-company sign-in page." between Legitimate Spam Phishing
+
+| Model              | Load   | Per answer | Answers/s |
+|--------------------|--------|------------|-----------|
+| tev1:4b            | 0.04 s | 130 ms     | 7.7       |
+| tev1-4b-cpu:latest | 0.02 s | 242 ms     | 4.1       |
+| nimble:latest      | 0.02 s | 131 ms     | 7.6       |
+```
+
+### Local (llama.cpp)
+
+`DEVICE=cpu script/benchmark` picks
 the device the same way `--device` does.
 
 ```
