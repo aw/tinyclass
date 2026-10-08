@@ -10,7 +10,7 @@ use llama_cpp_2::{LogOptions, send_logs_to_tracing};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{LazyLock, RwLock, OnceLock};
 
 use crate::config::Config;
 use crate::device::{Choice, Placement};
@@ -50,10 +50,45 @@ pub const CATALOG: &[Model] = &[
     },
 ];
 
-pub struct Loaded {
+pub struct LoadedLocal {
     pub backend: &'static LlamaBackend,
     pub model: LlamaModel,
     pub placement: Placement,
+}
+
+/// Loaded model handle for remote ollama inference.
+pub struct LoadedRemote {
+    pub model_name: String,
+    pub server_url: String,
+}
+
+/// A model available on the ollama server.
+#[derive(Debug, Clone)]
+pub struct RemoteModel {
+    pub name: String,
+}
+
+/// Loaded model, either local GGUF or remote ollama endpoint.
+pub enum Loaded {
+    Local {
+        backend: &'static LlamaBackend,
+        model: LlamaModel,
+        placement: Placement,
+        name: &'static str,
+    },
+    Remote {
+        model_name: String,
+        server_url: String,
+    },
+}
+
+impl Loaded {
+    pub fn model_name(&self) -> &str {
+        match self {
+            Loaded::Local { name, .. } => name,
+            Loaded::Remote { model_name, .. } => model_name,
+        }
+    }
 }
 
 impl Model {
@@ -84,7 +119,30 @@ impl Model {
         self.fetch()
     }
 
-    pub fn load(&self, choice: Choice) -> Result<Loaded> {
+    pub fn load(&self, choice: Choice) -> Result<LoadedLocal> {
+        self.load_local_impl(choice)
+    }
+
+    /// Resolve a Loaded handle for the current provider.
+    pub fn load_model(&self, choice: Choice) -> Result<Loaded> {
+        self.load_local_impl(choice).map(|local| Loaded::Local {
+            backend: local.backend,
+            model: local.model,
+            placement: local.placement,
+            name: self.name,
+        })
+    }
+
+    /// Load a Loaded::Remote handle for the ollama provider.
+    pub fn load_remote(&self) -> Result<Loaded> {
+        let url = host();
+        Ok(Loaded::Remote {
+            model_name: self.name.to_string(),
+            server_url: url,
+        })
+    }
+
+    fn load_local_impl(&self, choice: Choice) -> Result<LoadedLocal> {
         if !self.available() {
             bail!("{} isn't on disk yet — fetch it with `{} model pull`", self.name, paths::invoked_as());
         }
@@ -100,7 +158,7 @@ impl Model {
 
         let model = LlamaModel::load_from_file(backend, self.path(), &params)
             .with_context(|| format!("could not load {}", self.path().display()))?;
-        Ok(Loaded { backend, model, placement })
+        Ok(LoadedLocal { backend, model, placement })
     }
 
     fn fetch(&self) -> Result<()> {
@@ -167,6 +225,72 @@ pub fn physical_cores() -> usize {
         .map(|it| it.trim().split(',').count())
         .unwrap_or(1);
     (hardware_threads / threads_per_core).max(1)
+}
+
+/// Returns the ollama server URL: configured host or the well-known default.
+pub fn host() -> String {
+    match Config::load().ok().and_then(|it| it.host) {
+        Some(url) => url,
+        None => "http://localhost:11434".to_string(),
+    }
+}
+
+/// List available models on the ollama server.
+pub fn list_remote_models(url: &str) -> Result<Vec<RemoteModel>> {
+    let response = ureq::get(&format!("{url}/api/tags"))
+        .call()
+        .map_err(|e| anyhow::anyhow!("could not reach ollama at {url}: {e}"))?;
+
+    if !response.status().is_success() {
+        bail!(
+            "ollama API returned status {} — is the server running?",
+            response.status()
+        );
+    }
+
+    let body: serde_json::Value = response
+        .into_body()
+        .read_json()
+        .map_err(|e| anyhow::anyhow!("could not parse ollama response: {e}"))?;
+
+    let models = body
+        .get("models")
+        .and_then(|it| it.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|it| it.get("name").and_then(|it| it.as_str()))
+                .map(|name| RemoteModel {
+                    name: name.to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(models)
+}
+
+/// Cached version of list_remote_models.
+static REMOTE_MODEL_CACHE: LazyLock<RwLock<std::collections::HashMap<String, Vec<RemoteModel>>>> =
+    LazyLock::new(|| RwLock::new(std::collections::HashMap::new()));
+
+pub fn list_remote_models_cached(url: &str) -> Result<Vec<RemoteModel>> {
+    let cache = REMOTE_MODEL_CACHE.read().unwrap();
+    if let Some(models) = cache.get(url) {
+        return Ok(models.clone());
+    }
+    drop(cache);
+
+    let models = list_remote_models(url)?;
+    let mut cache = REMOTE_MODEL_CACHE.write().unwrap();
+    cache.insert(url.to_string(), models.clone());
+    Ok(models)
+}
+
+/// Check if a model is available on the ollama server.
+pub fn host_has_model(url: &str, name: &str) -> bool {
+    list_remote_models_cached(url).map_or(false, |models| {
+        models.iter().any(|it| it.name == name)
+    })
 }
 
 fn report_progress(file: &str, received: u64, total: Option<u64>) {

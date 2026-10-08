@@ -99,3 +99,19 @@ fn gpus() -> Vec<LlamaBackendDevice> {
         })
         .collect()
 }
+
+/// Check if the ollama server at the given URL is reachable.
+pub fn check_server(url: &str) -> Result<()> {
+    let parsed =
+        url::Url::parse(url).map_err(|e| anyhow::anyhow!("invalid Ollama URL '{url}': {e}"))?;
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("no host in URL"))?;
+    let port = parsed.port_or_known_default().unwrap_or(11434);
+
+    match std::net::TcpStream::connect(format!("{host}:{port}")) {
+        Ok(_) => Ok(()),
+        Err(e) => bail!("cannot reach ollama at {url}: {e}"),
+    }
+}
