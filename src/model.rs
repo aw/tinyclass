@@ -263,7 +263,7 @@ pub fn list_remote_models_cached(url: &str) -> Result<Vec<RemoteModel>> {
 
 /// Check if a model is available on the ollama server.
 pub fn host_has_model(url: &str, name: &str) -> bool {
-    list_remote_models_cached(url).map_or(false, |models| {
+    list_remote_models_cached(url).is_ok_and(|models| {
         models.iter().any(|it| it.name == name)
     })
 }

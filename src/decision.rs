@@ -329,7 +329,7 @@ fn prompt(instruction: &str, input: &str, choices: &[String], criteria: &[String
                 .unwrap_or_else(|| choice.clone());
             criteria_lines.push_str(&format!("- {label}: {desc}\n"));
         }
-        user_content.push_str("\n");
+        user_content.push('\n');
         user_content.push_str("Criteria:\n");
         user_content.push_str(&criteria_lines);
     }
@@ -376,7 +376,6 @@ fn last_token_logits(model: &LlamaModel, backend: &'static LlamaBackend, placeme
 }
 
 /// Scoring helpers used by both Local and Remote paths.
-
 fn scores_from_logits(choices: &[String], logits: &[f32], normalizer: f32) -> Decision {
     let scores = choices
         .iter()

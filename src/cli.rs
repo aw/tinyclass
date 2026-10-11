@@ -286,7 +286,7 @@ fn list_models() -> Result<()> {
         if let Some(models) = remote {
             for model in &models {
                 let mut marker = " ";
-                if current.as_deref() == Some(&model.name) {
+                if current == Some(model.name.as_str()) {
                     marker = "*";
                 }
                 println!("{marker} {}", model.name);
@@ -317,13 +317,13 @@ fn set_model(name: &str) -> Result<()> {
         let url = url.as_str();
         device::check_server(url)?;
         let remote = model::list_remote_models(url).ok();
-        if let Some(models) = remote {
-            if models.iter().any(|m| m.name == name) {
-                config.model = Some(name.to_string());
-                config.save()?;
-                println!("{} is set.", name);
-                return Ok(());
-            }
+        if let Some(models) = remote
+            && models.iter().any(|m| m.name == name)
+        {
+            config.model = Some(name.to_string());
+            config.save()?;
+            println!("{} is set.", name);
+            return Ok(());
         }
     }
 
@@ -389,7 +389,7 @@ fn clear_host() -> Result<()> {
     let mut config = Config::load()?;
     config.host = None;
     config.save()?;
-    println!("Ollama server URL cleared — will use {}.", "http://localhost:11434");
+    println!("Ollama server URL cleared — will use http://localhost:11434.");
     Ok(())
 }
 
@@ -550,10 +550,10 @@ fn batch(
     let choices: Option<Vec<String>> = choice.map(|choice_str| {
         choice_str.split('|').map(|s| s.trim().to_string()).collect()
     });
-    if let Some(ref choices_vec) = choices {
-        if choices_vec.len() < 2 {
-            bail!("--choice needs at least 2 pipe-separated choices, got: {}", choice.unwrap_or(""));
-        }
+    if let Some(ref choices_vec) = choices
+        && choices_vec.len() < 2
+    {
+        bail!("--choice needs at least 2 pipe-separated choices, got: {}", choice.unwrap_or(""));
     }
 
     let loaded = load_model(None)?;
