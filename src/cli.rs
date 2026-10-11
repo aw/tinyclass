@@ -77,6 +77,37 @@ pub enum Command {
         json: bool,
     },
     /// Rate a statement on a numeric scale defined by labeled criteria
+    Score {
+        /// The statement or context to rate
+        statement: String,
+        /// What the model is told to do with the statement
+        #[usage(long, default = "How would you rate this statement?")]
+        instruction: String,
+        /// Print the rating and breakdown as JSON
+        #[usage(long)]
+        json: bool,
+    },
+    /// Send multiple question types in a single request
+    Batch {
+        /// The context shared by all questions
+        state: String,
+        /// Pipe-separated choices, e.g. `billing|technical`
+        #[usage(long)]
+        choice: Option<String>,
+        /// Pipe-separated criteria pairs, `key:desc|key:desc`
+        #[usage(long)]
+        criteria: Option<String>,
+        /// A noul (yes/no judgment) question
+        #[usage(long)]
+        noul: Option<String>,
+        /// A score (numeric rating) question
+        #[usage(long)]
+        score: Option<String>,
+        /// Print answers as JSON
+        #[usage(long)]
+        json: bool,
+    },
+    /// Keep the model loaded and decide about every line typed on stdin
     Play {
         /// The choices, at least two
         choices: Vec<String>,
@@ -214,6 +245,12 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Command::Noul { statement, instruction, device, json } => {
             noul(&statement, &instruction, device.as_deref(), json)
+        }
+        Command::Score { statement, instruction, json } => {
+            score(&statement, &instruction, json)
+        }
+        Command::Batch { state, choice, criteria, noul, score, json } => {
+            batch(&state, choice.as_deref(), criteria.as_deref(), noul.as_deref(), score.as_deref(), json)
         }
         Command::Play { choices, instruction, device } => {
             play(&choices, &instruction, device.as_deref())
@@ -483,6 +520,105 @@ fn noul(statement: &str, instruction: &str, device: Option<&str>, json: bool) ->
         println!("{probability:.3}");
     }
     Ok(())
+}
+
+/// Rate a statement on a numeric scale defined by labeled criteria.
+fn score(statement: &str, instruction: &str, json: bool) -> Result<()> {
+    let loaded = load_model(None)?;
+    let score_result = decision::score(&loaded, instruction, statement)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&score_result.as_json())?);
+    } else {
+        print_score_plain(&score_result);
+    }
+    Ok(())
+}
+
+/// Send multiple question types in a single /v1/systemone request.
+fn batch(
+    state: &str,
+    choice: Option<&str>,
+    criteria: Option<&str>,
+    noul: Option<&str>,
+    score: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    if choice.is_none() && noul.is_none() && score.is_none() {
+        bail!("at least one of --choice, --noul, or --score is required");
+    }
+
+    let choices: Option<Vec<String>> = choice.map(|choice_str| {
+        choice_str.split('|').map(|s| s.trim().to_string()).collect()
+    });
+    if let Some(ref choices_vec) = choices {
+        if choices_vec.len() < 2 {
+            bail!("--choice needs at least 2 pipe-separated choices, got: {}", choice.unwrap_or(""));
+        }
+    }
+
+    let loaded = load_model(None)?;
+    match loaded {
+        Loaded::Local { .. } => {
+            bail!("batch requires ollama backend — it sends multiple question types in a single /v1/systemone request");
+        }
+        Loaded::Remote { ref server_url, ref model_name } => {
+            let questions = decision::build_questions(
+                choices.as_deref(),
+                criteria,
+                noul,
+                score,
+            );
+            let (parsed, _text) = decision::batch(server_url, model_name, state, &questions)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&parsed)?);
+            } else {
+                print_batch(&parsed);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Print the rating and breakdown as a plain string.
+fn print_score_plain(score_result: &decision::ScoreResult) {
+    println!("{:.3}", score_result.rating);
+    if !score_result.legend.is_empty() {
+        for (k, v) in &score_result.legend {
+            if let Some(prob) = score_result.probabilities.iter().find(|(pk, _)| pk == k) {
+                println!("  {v:<16}  {:>5.1}%", prob.1 * 100.0);
+            }
+        }
+    }
+}
+
+fn print_batch(parsed: &serde_json::Value) {
+    if let Some(answers) = parsed.get("answers").and_then(|v| v.as_object()) {
+        for (key, answer) in answers {
+            if let Some(ans_type) = answer.get("type").and_then(|v| v.as_str()) {
+                match ans_type {
+                    "score" => {
+                        let score_val = answer.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        println!("  {}: {:.3}", key, score_val);
+                    }
+                    "noul" => {
+                        let noul_val = answer.get("noul").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        println!("  {}: {:.3}", key, noul_val);
+                    }
+                    "choice" => {
+                        let choice = answer.get("choice").and_then(|v| v.as_str()).unwrap_or("?");
+                        println!("  {}: {}", key, choice);
+                    }
+                    _ => {
+                        println!("  {}: (type={})", key, ans_type);
+                    }
+                }
+                continue;
+            }
+            println!("  {}: {}", key, serde_json::to_string(answer).unwrap_or_else(|_| "?".to_string()));
+        }
+    } else {
+        println!("(no answers)");
+    }
 }
 
 fn play(choices: &[String], instruction: &str, device: Option<&str>) -> Result<()> {
