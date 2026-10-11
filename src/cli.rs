@@ -55,12 +55,12 @@ pub enum Command {
         /// Where to run: auto, cpu, gpu, or gpu:N; defaults to the set device
         #[usage(long)]
         device: Option<String>,
-        /// Which backend to use: llama-cpp (local GGUF) or ollama (remote server)
-        #[usage(long)]
-        backend: Option<String>,
         /// Print the decision as JSON
         #[usage(long)]
         json: bool,
+        /// Per-choice criteria as `name:description` pairs (ollama only)
+        #[usage(long)]
+        criteria: Vec<String>,
     },
     /// Ask a yes/no question: how likely the statement is true, from 0 to 1
     Noul {
@@ -72,14 +72,11 @@ pub enum Command {
         /// Where to run: auto, cpu, gpu, or gpu:N; defaults to the set device
         #[usage(long)]
         device: Option<String>,
-        /// Which backend to use: llama-cpp (local GGUF) or ollama (remote server)
-        #[usage(long)]
-        backend: Option<String>,
         /// Print the probability as JSON
         #[usage(long)]
         json: bool,
     },
-    /// Keep the model loaded and decide about every line typed on stdin
+    /// Rate a statement on a numeric scale defined by labeled criteria
     Play {
         /// The choices, at least two
         choices: Vec<String>,
@@ -89,9 +86,6 @@ pub enum Command {
         /// Where to run: auto, cpu, gpu, or gpu:N; defaults to the set device
         #[usage(long)]
         device: Option<String>,
-        /// Which backend to use: llama-cpp (local GGUF) or ollama (remote server)
-        #[usage(long)]
-        backend: Option<String>,
     },
     /// Upgrade a mise install to the latest release
     Upgrade {
@@ -149,7 +143,7 @@ pub enum BackendCommand {
     /// Set the current backend
     Set {
         /// Which backend to use: llama-cpp or ollama
-        #[usage(choices("llama-cpp", "ollama"), choices_strict = false)]
+        #[usage(choices("llama-cpp", "ollama"))]
         backend: String,
     },
     /// Show the current backend
@@ -172,19 +166,13 @@ pub enum ShellCompletionCommand {
     /// Write the completion script to stdout
     Print {
         /// The shell to generate for
-        #[usage(
-            choices("bash", "elvish", "zsh", "fish", "nu", "powershell"),
-            choices_strict = false
-        )]
+        #[usage(choices("bash", "elvish", "zsh", "fish", "nu", "powershell"))]
         shell: String,
     },
     /// Write the completion script where the shell looks for it
     Install {
         /// The shell to install for
-        #[usage(
-            choices("bash", "elvish", "zsh", "fish", "nu", "powershell"),
-            choices_strict = false
-        )]
+        #[usage(choices("bash", "elvish", "zsh", "fish", "nu", "powershell"))]
         shell: String,
     },
 }
@@ -221,14 +209,14 @@ pub fn run(cli: Cli) -> Result<()> {
             DeviceCommand::List => list_devices(),
             DeviceCommand::Set { device } => set_device(&device),
         },
-        Command::Decide { input, choices, instruction, device, backend, json } => {
-            decide(&input, &choices, &instruction, device.as_deref(), backend.as_deref(), json)
+        Command::Decide { input, choices, instruction, device, json, criteria } => {
+            decide(&input, &choices, &instruction, device.as_deref(), json, &criteria)
         }
-        Command::Noul { statement, instruction, device, backend, json } => {
-            noul(&statement, &instruction, device.as_deref(), backend.as_deref(), json)
+        Command::Noul { statement, instruction, device, json } => {
+            noul(&statement, &instruction, device.as_deref(), json)
         }
-        Command::Play { choices, instruction, device, backend } => {
-            play(&choices, &instruction, device.as_deref(), backend.as_deref())
+        Command::Play { choices, instruction, device } => {
+            play(&choices, &instruction, device.as_deref())
         }
         Command::Upgrade { version } => upgrade::run(version.as_deref()),
         Command::ShellCompletion { command } => match command {
@@ -445,42 +433,39 @@ fn set_device(text: &str) -> Result<()> {
     Ok(())
 }
 
-/// Resolve which variant of Loaded to use: check backend flag, fall back to config.
-fn resolve_backend(flag: Option<&str>) -> Backend {
-    match flag {
-        Some("ollama") => Backend::Remote,
-        Some(_) | None => Config::load().ok().and_then(|c| c.backend)
-            .filter(|b| b == "ollama")
-            .map_or(Backend::Local, |_| Backend::Remote),
-    }
-}
-
-/// Load a Loaded handle according to the resolved backend.
-fn load_model(model: &Model, device: Option<&str>, backend: Option<&str>) -> Result<Loaded> {
-    match resolve_backend(backend) {
+/// Load a Loaded handle according to the current backend.
+fn load_model(device: Option<&str>) -> Result<Loaded> {
+    let config = Config::load()?;
+    match Backend::current(&config) {
         Backend::Remote => {
-            let url = model::host();
-            device::check_server(&url)?;
-            Ok(Loaded::Remote {
-                model_name: model.name.to_string(),
-                server_url: url,
-            })
+            let (url, model_name) = remote_target(&config)?;
+            Ok(Loaded::Remote { model_name, server_url: url })
         }
         Backend::Local => {
-            let loaded_local = model.load(Choice::current(device)?)?;
+            let m = Model::current()?;
+            let local = m.load(Choice::current(device)?)?;
             Ok(Loaded::Local {
-                backend: loaded_local.backend,
-                model: loaded_local.model,
-                placement: loaded_local.placement,
-                name: model.name,
+                backend: local.backend,
+                model: local.model,
+                placement: local.placement,
+                name: m.name,
             })
         }
     }
 }
 
-fn decide(input: &str, choices: &[String], instruction: &str, device: Option<&str>, backend_flag: Option<&str>, json: bool) -> Result<()> {
-    let loaded = load_model(Model::current()?, device, backend_flag)?;
-    let decision = decision::decide(&loaded, instruction, input, choices)?;
+fn remote_target(config: &Config) -> Result<(String, String)> {
+    let model_name = config.model.clone().ok_or_else(|| {
+        anyhow::anyhow!("no model set — run `tinyclass model set <name>`")
+    })?;
+    let url = model::host();
+    device::check_server(&url)?;
+    Ok((url, model_name))
+}
+
+fn decide(input: &str, choices: &[String], instruction: &str, device: Option<&str>, json: bool, criteria: &[String]) -> Result<()> {
+    let loaded = load_model(device)?;
+    let decision = decision::decide(&loaded, instruction, input, choices, criteria)?;
     if json {
         print_json(&decision)?;
     } else {
@@ -489,8 +474,8 @@ fn decide(input: &str, choices: &[String], instruction: &str, device: Option<&st
     Ok(())
 }
 
-fn noul(statement: &str, instruction: &str, device: Option<&str>, backend_flag: Option<&str>, json: bool) -> Result<()> {
-    let loaded = load_model(Model::current()?, device, backend_flag)?;
+fn noul(statement: &str, instruction: &str, device: Option<&str>, json: bool) -> Result<()> {
+    let loaded = load_model(device)?;
     let probability = decision::noul(&loaded, instruction, statement)?;
     if json {
         println!("{}", serde_json::json!({ "probability": probability }));
@@ -500,10 +485,9 @@ fn noul(statement: &str, instruction: &str, device: Option<&str>, backend_flag: 
     Ok(())
 }
 
-fn play(choices: &[String], instruction: &str, device: Option<&str>, backend_flag: Option<&str>) -> Result<()> {
-    let current = Model::current()?;
-    eprintln!("Loading {}…", current.name);
-    let loaded = load_model(&current, device, backend_flag)?;
+fn play(choices: &[String], instruction: &str, device: Option<&str>) -> Result<()> {
+    eprintln!("Loading model…");
+    let loaded = load_model(device)?;
     eprintln!("Running on {}.", loaded.model_name());
     eprintln!("Deciding between {} for every line; Ctrl-D ends.", choices.join(", "));
 
@@ -519,7 +503,7 @@ fn play(choices: &[String], instruction: &str, device: Option<&str>, backend_fla
         }
         let input = line.trim();
         if !input.is_empty() {
-            print_decision(&decision::decide(&loaded, instruction, input, choices)?);
+            print_decision(&decision::decide(&loaded, instruction, input, choices, &[])?);
         }
     }
     Ok(())
