@@ -154,7 +154,7 @@ tinyclass play Positive Negative   # keeps the model loaded, decides per line ty
 # → Negative
 # > The moon is made of cheese
 #   Positive   54.9%  ████████████████
-#   Negative  45.1%  ██████████████
+#   Negative   45.1%  ██████████████
 # → Positive
 ```
 
@@ -244,4 +244,3 @@ It ships with [llama.cpp](https://github.com/ggml-org/llama.cpp) compiled
 in, which is MIT licensed, copyright (c) 2023-2026 The ggml authors. The
 Qwen3 models it downloads are Alibaba's, under the
 [Apache License 2.0](https://huggingface.co/Qwen/Qwen3-0.6B/blob/main/LICENSE).
-```
